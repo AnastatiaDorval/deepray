@@ -8,9 +8,17 @@ except ImportError:
     from PyQt4.QtCore import *
 
 # from PyQt4.QtOpenGL import *
+import sys
+import matplotlib
+matplotlib.use('Qt5Agg')
+
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
 
 from libs.shape import Shape
 from libs.utils import distance
+import matplotlib.pyplot as plt
+from astropy.visualization import astropy_mpl_style
 
 CURSOR_DEFAULT = Qt.ArrowCursor
 CURSOR_POINT = Qt.PointingHandCursor
@@ -19,7 +27,11 @@ CURSOR_MOVE = Qt.ClosedHandCursor
 CURSOR_GRAB = Qt.OpenHandCursor
 
 # class Canvas(QGLWidget):
-
+class MplCanvas(FigureCanvasQTAgg):
+    def __init__(self, parent=None, width=5, height=4, dpi=100):
+        fig = Figure(figsize=(width, height), dpi=dpi)
+        self.axes = fig.add_subplot(111)
+        super(MplCanvas, self).__init__(fig)
 
 class Canvas(QWidget):
     zoomRequest = pyqtSignal(int)
@@ -49,6 +61,7 @@ class Canvas(QWidget):
         self.scale = 1.0
         self.label_font_size = 8
         self.pixmap = QPixmap()
+        self.image = matplotlib.image.AxesImage(ax=None)
         self.visible = {}
         self._hide_background = False
         self.hide_background = False
@@ -549,7 +562,10 @@ class Canvas(QWidget):
     def offset_to_center(self):
         s = self.scale
         area = super(Canvas, self).size()
-        w, h = self.pixmap.width() * s, self.pixmap.height() * s
+        if self.pixmap is None:
+            w, h = self.image.get_extent()[1] * s, self.image.get_extent()[3] * s
+        else:
+            w, h = self.pixmap.width() * s, self.pixmap.height() * s
         aw, ah = area.width(), area.height()
         x = (aw - w) / (2 * s) if aw > w else 0
         y = (ah - h) / (2 * s) if ah > h else 0
@@ -691,8 +707,18 @@ class Canvas(QWidget):
         self.drawingPolygon.emit(False)
         self.update()
 
-    def load_pixmap(self, pixmap):
+    def load_pixmap(self, pixmap): #make a version for fits with plot
         self.pixmap = pixmap
+        self.shapes = []
+        self.repaint()
+
+    def load_fits(self, image): #create a canvas within a canvas
+        plt.style.use(astropy_mpl_style)
+        x = image.shape[0]//1000
+        y = image.shape[1]//1000
+        plt.figure(figsize=(x,y), dpi=1000)
+        print(plt.imshow(image, cmap='gray'))
+        self.image = plt.imshow(image, cmap='gray')
         self.shapes = []
         self.repaint()
 

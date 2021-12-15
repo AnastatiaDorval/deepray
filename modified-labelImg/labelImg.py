@@ -8,10 +8,18 @@ from pickle import FALSE
 import platform
 import re
 import sys
+import matplotlib
 import subprocess
 import shutil
 import webbrowser as wb
 
+from astropy.io import fits
+from astropy.utils.data import get_pkg_data_filename
+
+import matplotlib.pyplot as plt
+from astropy.visualization import astropy_mpl_style
+import numpy as np
+from PIL import Image as im
 from functools import partial
 from collections import defaultdict
 
@@ -42,10 +50,8 @@ from libs.zoomWidget import ZoomWidget
 from libs.colorDialog import ColorDialog
 from libs.labelFile import LabelFile, LabelFileError, LabelFileFormat
 from libs.toolBar import ToolBar
-from libs.pascal_voc_io import PascalVocReader
 from libs.pascal_voc_io import XML_EXT
 from libs.yolo_io import TXT_EXT
-from libs.create_ml_io import CreateMLReader
 from libs.create_ml_io import JSON_EXT
 from libs.ustr import ustr
 from libs.hashableQListWidgetItem import HashableQListWidgetItem
@@ -348,7 +354,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.statusBar().show()
 
         # Application state.
-        self.image = QImage()
+        self.image = matplotlib.image.AxesImage(ax=None)
         self.file_path = ustr(default_filename)
         self.last_open_dir = None
         self.recent_files = []
@@ -737,12 +743,12 @@ class MainWindow(QMainWindow, WindowMixin):
         # Make sure that filePath is a regular python string, rather than QString
         file_path = ustr(file_path)
 
-        # Fix bug: An  index error after select a directory when open a new file.
+        # Fix bug: An index error after select a directory when open a new file.
         unicode_file_path = ustr(file_path)
-        unicode_file_path = os.path.abspath(unicode_file_path)
+
         # Tzutalin 20160906 : Add file list and dock to move faster
         # Highlight the file item
-        if unicode_file_path and self.file_list_widget.count() > 0:
+        if unicode_file_path:
             if unicode_file_path in self.m_img_list:
                 index = self.m_img_list.index(unicode_file_path)
                 file_widget_item = self.file_list_widget.item(index)
@@ -751,41 +757,19 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.file_list_widget.clear()
                 self.m_img_list.clear()
 
-        if unicode_file_path and os.path.exists(unicode_file_path):
-            if LabelFile.is_label_file(unicode_file_path):
-                try:
-                    self.label_file = LabelFile(unicode_file_path)
-                except LabelFileError as e:
-                    self.error_message(u'Error opening file',
-                                       (u"<p><b>%s</b></p>"
-                                        u"<p>Make sure <i>%s</i> is a valid label file.")
-                                       % (e, unicode_file_path))
-                    self.status("Error reading %s" % unicode_file_path)
-                    return False
-                self.image_data = self.label_file.image_data
-                self.line_color = QColor(*self.label_file.lineColor)
-                self.fill_color = QColor(*self.label_file.fillColor)
-                self.canvas.verified = self.label_file.verified
-            else:
-                # Load image:
-                # read data first and store for saving into label file.
-                self.image_data = read(unicode_file_path, None)
-                self.label_file = None
-                self.canvas.verified = False
-
             if isinstance(self.image_data, QImage):
                 image = self.image_data
             else:
-                image = QImage.fromData(self.image_data)
-            if image.isNull():
+                image = fits.getdata(unicode_file_path, ext=0)
+            if not isinstance(image, object):
                 self.error_message(u'Error opening file',
                                    u"<p>Make sure <i>%s</i> is a valid image file." % unicode_file_path)
                 self.status("Error reading %s" % unicode_file_path)
                 return False
             self.status("Loaded %s" % os.path.basename(unicode_file_path))
-            self.image = image
+            self.image = plt.imshow(image, cmap='gray')
             self.file_path = unicode_file_path
-            self.canvas.load_pixmap(QPixmap.fromImage(image))
+            self.canvas.load_fits(image)
             self.set_clean()
             self.canvas.setEnabled(True)
             self.adjust_scale(initial=True)
@@ -810,15 +794,15 @@ class MainWindow(QMainWindow, WindowMixin):
     
 
     def resizeEvent(self, event):
-        if self.canvas and not self.image.isNull()\
+        if self.canvas and isinstance(self.image, object)\
            and self.zoom_mode != self.MANUAL_ZOOM:
             self.adjust_scale()
         super(MainWindow, self).resizeEvent(event)
 
     def paint_canvas(self):
-        assert not self.image.isNull(), "cannot paint null image"
+        assert isinstance(self.image, object), "cannot paint null image"
         self.canvas.scale = 0.01 * self.zoom_widget.value()
-        self.canvas.label_font_size = int(0.02 * max(self.image.width(), self.image.height()))
+        self.canvas.label_font_size = int(0.02 * max(self.image.get_extent()[1], self.image.get_extent()[3]))
         self.canvas.adjustSize()
         self.canvas.update()
 
@@ -833,15 +817,15 @@ class MainWindow(QMainWindow, WindowMixin):
         h1 = self.centralWidget().height() - e
         a1 = w1 / h1
         # Calculate a new scale value based on the pixmap's aspect ratio.
-        w2 = self.canvas.pixmap.width() - 0.0
-        h2 = self.canvas.pixmap.height() - 0.0
+        w2 = self.canvas.image.get_extent()[1] - 0.0
+        h2 = self.canvas.image.get_extent()[3] - 0.0
         a2 = w2 / h2
         return w1 / w2 if a2 >= a1 else h1 / h2
 
     def scale_fit_width(self):
         # The epsilon does not seem to work too well here.
         w = self.centralWidget().width() - 2.0
-        return w / self.canvas.pixmap.width()
+        return w / self.canvas.image.get_extent()[1]
 
     def closeEvent(self, event):
         if not self.may_continue():
@@ -982,9 +966,9 @@ class MainWindow(QMainWindow, WindowMixin):
         if not self.may_continue():
             return
         path = os.path.dirname(ustr(self.file_path)) if self.file_path else '.'
-        formats = ['*.%s' % fmt.data().decode("ascii").lower() for fmt in QImageReader.supportedImageFormats()]
-        filters = "Image & Label files (%s)" % ' '.join(formats + ['*%s' % LabelFile.suffix])
-        filename = QFileDialog.getOpenFileName(self, '%s - Choose Image or Label file' % __appname__, path, filters)
+        formats = ['*.fits']
+        filters = "Fits files (%s)" % ' '.join(formats)
+        filename = QFileDialog.getOpenFileName(self,"Open Fits File", path, filters)
         if filename:
             if isinstance(filename, (tuple, list)):
                 filename = filename[0]
@@ -1008,7 +992,7 @@ class MainWindow(QMainWindow, WindowMixin):
                             else self.save_file_dialog(remove_ext=False))
 
     def save_file_as(self, _value=False):
-        assert not self.image.isNull(), "cannot save empty image"
+        assert isinstance(self.image, object), "cannot save empty image"
         self._save_file(self.save_file_dialog())
 
     def save_file_dialog(self, remove_ext=True):
